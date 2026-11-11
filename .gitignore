@@ -1,0 +1,33 @@
+# Credentials and private environment configuration
+.env
+.env.*
+!.env.example
+creds.md
+
+# Customer documents, screenshots, evidence and private queues
+/runs/
+/artifacts/
+/images/
+approved-files*.json
+
+# Private assistant configuration/history; not needed to run the application
+.claude/
+.claude.json
+
+# Historical prototypes with case-specific identifiers: keep local, do not publish
+/agent/probe*.py
+!/agent/probe_native_download.py
+/agent/explore_city.py
+/agent/explore_verify.py
+/agent/prepare_docs.py
+/agent/stage_city.py
+/agent/try_compress.py
+
+# Local Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local OS metadata
+.DS_Store
