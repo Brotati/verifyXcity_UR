@@ -1,5 +1,25 @@
 # Hybrid verification and offline bank-side testing
 
+## Developer clarification — 12 November 2026
+
+The operator relayed the developers' confirmed sequence: open/select the trip,
+choose attachments, **Save in Verify**, then Download Selected. The historical
+tests below deliberately omitted Save under the instructions in force then.
+Report-only results therefore do not establish a backend defect; they show that
+unsaved selections were not used by that download path.
+
+The [global operating rules](../verify-citybank-upload-agent-prompt.md) now require
+controlled Verify Save during authorized processing and OCR/content-based
+routing of fixed LOI-category documents and Bank Verification authorization
+letters. The new [standalone daily runner](../daily_runner.py) implements controlled
+selection Save and junior-guided mapping without OCR, but its new offline suite
+and live behavior could not be executed in the assistant session. Read the
+[junior runbook](DAILY_RUNNER.md); old source-only helpers still use the earlier
+no-Save flow. **City Bank Save remains forbidden.** No historical evidence is
+being reclassified as a successful test
+of the new workflow, and no live actions were performed for this documentation
+update.
+
 ## Scope and result
 
 On 11 November 2026, an operator-authorized case was inspected on live Verify.
@@ -121,11 +141,12 @@ include **unsaved** attachment selections. Backend handling of stored selections
 has not been inspected; do not claim a particular backend implementation is
 proven by frontend code alone.
 
-**Do not click Save as a workaround.** The appropriate product fix is to support
-transient attachment selection in read-only PDF generation and pass that
-selection from the native download action, or confirm an existing supported
-read-only generation path. Verify source-code/server changes are outside this
-repository and were not performed by the test.
+**The original recommendation against Verify Save is superseded by the developers' clarification above.** The required next implementation is controlled
+Verify selection Save followed by native download, without editing unrelated
+report values. A new transient-selection backend API is not established as
+necessary by these tests. Read-only inspection must still avoid Save, and
+City Bank Save/final submission remains forbidden. Verify source-code/server
+changes were not performed by the historical test.
 
 ## Evidence and interpretation
 

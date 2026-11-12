@@ -1,6 +1,36 @@
 # Verify → City Bank: technical overview and operating handover
 
-Last updated: **11 November 2026**
+Last updated: **12 November 2026**
+
+## New junior entry point
+
+Use **[daily_runner.py](daily_runner.py)** and the [junior runbook](docs/DAILY_RUNNER.md).
+This is one standalone file with no `agent/` imports or AI/OCR dependency. It
+implements today's Request Date discovery, terminal progress, junior mapping and
+PDF approval, controlled Verify selection Save, guarded bank uploads and daily
+checkpoints. City Bank Save remains forbidden. The embedded offline suite must
+pass for the exact file/environment before prepare/run modes unlock.
+
+**This new implementation was not executed or live-validated in the assistant
+session because the tool safety check blocked execution.** Historical test
+results below do not establish that the new runner passes. Validate offline,
+then read-only, then one explicitly approved file; never start with a bulk write.
+The older module descriptions below remain useful maintenance history, not the
+junior's preferred command sequence.
+
+> **Policy update / implementation warning:** the latest authoritative rules are
+> [global operating and mapping rules](verify-citybank-upload-agent-prompt.md).
+> Verify's LOI category must be classified by OCR/content into declaration,
+> salary certificate or payslip as appropriate; authorization letters must be
+> inspected in Bank Verification attachments. Developers confirmed that the
+> authorized download flow requires **Verify Save before Download Selected**.
+> City Bank Save remains forbidden. The older `agent/` scripts described below
+> still implement the no-Verify-Save flow and fixed-label mapping. The new root
+> daily runner implements controlled Save with junior-guided mapping, but needs
+> execution and supervised validation. OCR is intentionally not implemented.
+> Historical no-Save tests did not establish a backend defect. Existing code
+> descriptions/commands below are an as-built reference, not proof of compliance
+> with this new policy.
 
 ## 1. Start here
 
@@ -11,7 +41,7 @@ It is a **supervised Python/Playwright toolset**, not a fully autonomous product
 ### Three rules that must never be misunderstood
 
 1. **Selecting a PDF in a City Bank UR file picker uploads it immediately.** Leaving Save unclicked does not make file selection a dry run. The bank can retain the uploaded file.
-2. **Do not click Save on either portal.** The present workflow stops after uploads and their verification; final bank submission is intentionally outside scope. Never modify Verify answers, remarks, verification status, or other report data.
+2. **Never click City Bank Save/final submission.** Verify Save is required to persist the intended attachment selection during an explicitly authorized processing run, but not during read-only exploration. Do not edit Verify answers, remarks, bank details or verification status; the controlled Save implementation must verify that unrelated report values remain unchanged.
 3. **Do not work on green “Received (Full)” MIS files.** Check bank status before source work and again before uploading. Only a positively read blank status is automatically eligible; an unknown status requires review.
 
 ### Current validation status

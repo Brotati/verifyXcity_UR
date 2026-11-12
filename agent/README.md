@@ -4,7 +4,33 @@
 for architecture, setup, the complete operating procedure, recovery, selector
 maintenance, security controls, and tested-versus-untested behavior.
 
-## Verified scope and safety
+## Junior handover: use the standalone daily runner
+
+The junior's one-file entry point is **[daily_runner.py](../daily_runner.py)**.
+Read [the daily runbook](../docs/DAILY_RUNNER.md). It scans today's Request Date,
+processes eligible files sequentially, asks for mappings/review, and keeps bank
+Save blocked. It uses no AI/OCR or project-module imports. Run its embedded
+`--offline-test` first: prepare/run modes are locked until that exact file and
+environment pass. The new tests and live behavior have **not** been executed in
+this assistant session due tool permissions. The commands below describe earlier
+utilities, not the supported junior daily entry point.
+
+## Latest global policy / legacy-code distinction
+
+Read the [global operating rules](../verify-citybank-upload-agent-prompt.md).
+Verify's fixed LOI category needs OCR/content classification for declarations,
+salary certificates and payslips; authorization letters must be inspected in
+Bank Verification attachments. The developer-confirmed processing sequence is
+trip selection → attachment selection → **Verify Save** → Download Selected.
+**City Bank Save remains forbidden**, and read-only inspection must not Save.
+
+The older scripts in this directory still contain no-Verify-Save guards and
+fixed mapping logic. The root daily runner implements controlled Verify Save and
+human mapping, pending validation; OCR was explicitly skipped. Do not treat the
+legacy commands below as the updated daily execution workflow.
+Earlier no-Save download failures do not, by themselves, prove a backend defect.
+
+## Historical validation and existing code safeguards
 
 A supervised test for the operator-selected applicant/file on 2026-11-10 completed
 four document uploads. The bank accepted each upload; the returned PDFs were
