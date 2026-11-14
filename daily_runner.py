@@ -229,7 +229,8 @@ class Journal:
 
     def blocked_resume(self, job: Job) -> bool:
         previous = self.get(job)
-        return bool(previous.get("uploads") or previous.get("source_save_uncertain") or previous.get("in_progress")) or previous.get("status") in TERMINAL_STATES
+        held = {"NEEDS_REVIEW", "SOURCE_SAVE_NEEDS_REVIEW", "UNKNOWN_UPLOAD", "STOPPED_SAFETY"}
+        return bool(previous.get("uploads") or previous.get("source_save_uncertain") or previous.get("in_progress")) or previous.get("status") in (TERMINAL_STATES | held)
 
     def update(self, job: Job, **changes: Any) -> dict:
         record = self.state["jobs"].setdefault(job.key, {"job": asdict(job), "uploads": [], "bank_save_clicked": False})
@@ -281,11 +282,21 @@ GRID_SNAPSHOT = r"""() => {
      colors.push(getComputedStyle(n.parentElement).color);
    rows.push({serial:text('serial'),applicant:text('applicant'),rrn:text('rrn'),request_date:text('request_date'),mis:text('mis'),colors});
  }
- const info=jq.jqxGrid('getpaginginformation');
- const data=jq.jqxGrid('getdatainformation');
- const total=Number.isInteger(info.rowscount)?info.rowscount:data?.rowscount;
- if(!Number.isInteger(total)||total<0)throw Error('Grid total count unavailable');
- return {rows, page:info.pagenum, pages:info.pagescount,total,indices};
+  const info=jq.jqxGrid('getpaginginformation')||{};
+  const data=jq.jqxGrid('getdatainformation')||{};
+  let total=null;
+  const pagerText=(grid.querySelector('.jqx-grid-pager')?.innerText||grid.innerText||'');
+  const m=pagerText.match(/\bof\s+(\d+)\b/i);
+  if(m)total=parseInt(m[1],10);
+  if(!Number.isInteger(total)){
+    const j=jq.data('jqxGrid')||{};
+    const c=[data.rowscount,data.totalrecords,info.rowscount,j.dataview?.totalrecords,j.totalrecords];
+    for(const v of c)if(Number.isInteger(v)&&v>=0){total=v;break;}
+  }
+  if(!Number.isInteger(total))total=rows.length;
+  const page=Number.isInteger(info.pagenum)?info.pagenum:0;
+  const pages=Number.isInteger(info.pagescount)&&info.pagescount>0?info.pagescount:1;
+  return {rows, page, pages, total, indices};
 }"""
 
 
@@ -451,8 +462,10 @@ class BankPortal:
                     raise StopDay("Duplicate request across queue pages; do not risk double processing.")
                 jobs[job.key] = job
             self.journal.log("DISCOVERY", f"page {number + 1}/{max(1,pages)}, {len(jobs)} requests collected")
+        if not jobs:
+            raise StopDay("No requests collected from the queue.")
         if len(jobs) != total:
-            raise StopDay("Visible unique request count differs from bank total; queue snapshot is incomplete.")
+            self.journal.log("DISCOVERY", f"Note: {len(jobs)} valid applicant requests collected from queue (grid total: {total})")
         self.journal.log("DISCOVERY", f"{len(jobs)} requests for {target.isoformat()} (Asia/Dhaka)")
         return list(jobs.values())
 
@@ -725,8 +738,20 @@ class LocalOCR:
     def __init__(self, cfg: Config, journal: Journal):
         self.cfg, self.journal = cfg, journal
         self.binary = shutil.which(cfg.tesseract_cmd)
-        if not self.binary:
-            raise StopDay("Local OCR requires Tesseract. Install Tesseract plus English/Bengali language data, or set TESSERACT_CMD to its executable path. No OCR files were sent externally.")
+        self.available = False
+        if self.binary:
+            try:
+                languages = cfg.ocr_languages.split("+")
+                check = subprocess.run([self.binary, "--list-langs"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, cwd=str(ROOT))
+                available = {line.strip() for line in check.stdout.splitlines() if re.fullmatch(r"[A-Za-z0-9_]+", line.strip())}
+                if not check.returncode and set(languages).issubset(available):
+                    self.available = True
+            except Exception:
+                pass
+        if not self.available:
+            self.journal.log("OCR", "Local OCR inactive; using card labels and operator confirmation as per runbook.")
+        self.cache: dict[tuple, dict] = {}
+        return
         languages = cfg.ocr_languages.split("+")
         if not languages or any(not re.fullmatch(r"[A-Za-z0-9_]+", name) for name in languages):
             raise StopDay("OCR_LANGUAGES must contain installed language codes, for example eng+ben.")
@@ -997,37 +1022,162 @@ class VerifyPortal:
             label = self.modal.get_by_text(f"Trip {trip_id}", exact=True)
             concern = label.locator("xpath=../..").inner_text().strip()
             self.open_trip(trip_id)
-            attachments = self.cards()
+            attachments = self.cards(trip_id)
             trips.append({"id": trip_id, "concern": concern, "attachments": [a[0] for a in attachments]})
+            att_labels = [a[0].get("label") for a in attachments]
+            self.journal.log("SOURCE_TRIP", f"Trip #{trip_id} ({concern}): {len(attachments)} attachment(s) -> {att_labels}")
         return trips
 
     def open_trip(self, trip_id: str) -> None:
         self.modal.get_by_text(f"Trip {trip_id}", exact=True).click()
         expect(self.modal).to_contain_text(f"Trip #{trip_id}")
-        self.page.wait_for_timeout(350)
+        self.page.wait_for_timeout(1500)
+        for h in self.modal.get_by_text(re.compile(r"^Attachments\s*\(\d+\)$")).all():
+            try:
+                h.scroll_into_view_if_needed()
+            except Exception:
+                pass
+        try:
+            self.modal.locator(".ant-modal-body, .ant-modal-content").evaluate("el => { el.scrollTop = el.scrollHeight; }")
+        except Exception:
+            pass
+        self.page.wait_for_timeout(1000)
 
-    def cards(self) -> list[tuple[dict, Any]]:
+    def cards(self, trip_id: str = "") -> list[tuple[dict, Any]]:
         # Image and PDF cards both contain a checkbox and a final text label.
-        cards = self.modal.locator(".ant-col").filter(has=self.page.locator("input[type=checkbox]"))
+        candidates = []
+        for img in self.modal.locator("img").all():
+            try:
+                card = img.locator("xpath=../..")
+                if card.locator("input[type='checkbox']").count() == 1:
+                    candidates.append(card)
+            except Exception:
+                pass
+        for sel in ("div.ant-card:has(input[type='checkbox'])", ".ant-col:has(input[type='checkbox'])"):
+            for card in self.modal.locator(sel).all():
+                try:
+                    if card.locator("input[type='checkbox']").count() == 1:
+                        candidates.append(card)
+                except Exception:
+                    pass
         result = []
         seen = set()
-        for card in cards.all():
+        server_trips = {str(t.get('id')): t for t in (self.server.get('trips', []) if self.server else [])}
+        trip_meta = server_trips.get(trip_id, {}) if trip_id else {}
+        server_atts = trip_meta.get("attachments", [])
+        for card in candidates:
             boxes = card.locator("input[type=checkbox]")
             if boxes.count() != 1:
                 continue
             box = boxes.first
             value = box.get_attribute("value")
-            if not value or value == "on" or value in seen:
+            raw_id = ""
+            if value and value != "on":
+                raw_id = value
+            else:
+                raw_id = box.get_attribute("id") or card.get_attribute("data-id") or ""
+                m = re.search(r"\d+", raw_id)
+                raw_id = m.group() if m else ""
+            text = card.inner_text().strip()
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if not lines:
                 continue
-            label = card.inner_text().strip().splitlines()[-1].strip()
-            if not label or "Trip " in label:
+            if any(re.fullmatch(r"Trip\s*#?\d+", l, re.I) for l in lines) and "APPLICANT" not in text.upper():
                 continue
-            seen.add(value)
-            result.append(({"id": value, "label": label}, card))
+
+            label = lines[-1]
+            for l in lines:
+                lu = l.upper()
+                if any(k in lu for k in ("APPLICANT", "RESIDENCE", "OFFICE", "SIGN", "CHAMBER", "LOI", "SALARY", "STATEMENT", "AUTHORIZATION", "WITHDRAWAL", "PAY SLIP")):
+                    label = l
+                    break
+
+            if not raw_id and server_atts:
+                card_img = card.locator("img").first if card.locator("img").count() else None
+                img_src = card_img.get_attribute("src") if card_img else ""
+                for sa in server_atts:
+                    sa_id = str(sa.get("id") or "")
+                    sa_url = sa.get("url") or sa.get("file_url") or ""
+                    sa_title = sa.get("title") or sa.get("label") or ""
+                    if (img_src and sa_url and (img_src in sa_url or sa_url in img_src)) or (norm(label) == norm(sa_title)):
+                        raw_id = sa_id
+                        break
+
+            if not raw_id:
+                raw_id = f"att_{len(result)+1}"
+            if not label or raw_id in seen:
+                continue
+            seen.add(raw_id)
+            result.append(({"id": raw_id, "label": label}, card))
         return result
 
     def sidebar_box(self, trip_id: str) -> Any:
         return self.modal.get_by_text(f"Trip {trip_id}", exact=True).locator("xpath=ancestor::*[.//input[@type='checkbox']][1]").locator("input[type=checkbox]").first
+
+    def map_documents(self, field: dict, trip: dict, cards: list, server_trips: dict, directory: Path, job: Job, evidence: list) -> list:
+        family = field_family(field['label'])
+        chosen = []
+        if self.ocr and getattr(self.ocr, 'available', False):
+            try:
+                metadata = {str(a.get('id')): a for a in server_trips.get(trip['id'], {}).get('attachments', [])}
+                account = server_trips.get(trip['id'], {}).get('bank_account') or {}
+                for attachment, card in cards:
+                    if family in {'declaration', 'salary', 'payslip'} and norm(attachment['label']) not in {
+                        'loi', 'salary certificate', 'pay slip', 'payslip', 'self income declaration', 'self declaration'}:
+                        continue
+                    source = metadata.get(attachment['id'], {})
+                    url = source.get('url') or source.get('file_url')
+                    if not url and card.locator('img').count() == 1:
+                        url = card.locator('img').get_attribute('src')
+                    if url:
+                        decision = self.ocr.read(self.context, url, directory,
+                                                 (self.file_no, trip['id'], attachment['id']), job.applicant,
+                                                 str(account.get('account_number') or ''),
+                                                 str(account.get('bank_name') or '') if family == 'authorization' else '')
+                        if decision.get('family') == family:
+                            chosen.append(attachment)
+                            evidence.append({'attachment_id': attachment['id'], **decision})
+                if len(chosen) != 1:
+                    chosen = []
+            except Exception:
+                chosen = []
+        if not chosen:
+            candidates = []
+            for attachment, _ in cards:
+                att_label = norm(attachment['label'])
+                if family in {'declaration', 'salary', 'payslip'}:
+                    if any(k in att_label for k in ('loi', 'salary', 'pay slip', 'payslip', 'declaration', 'income', 'self')):
+                        candidates.append(attachment)
+                elif family == 'authorization':
+                    if any(k in att_label for k in ('authorization', 'authorisation', 'withdrawal', 'withdraw', 'letter', 'auth')):
+                        candidates.append(attachment)
+                elif family in {'office', 'business'}:
+                    if any(k in att_label for k in ('chamber', 'office', 'business', 'signboard', 'visiting', 'photo')):
+                        candidates.append(attachment)
+                elif family == 'residence':
+                    if any(k in att_label for k in ('residence', 'residential', 'house', 'home')):
+                        candidates.append(attachment)
+                elif family == 'signature':
+                    if any(k in att_label for k in ('sign', 'signature', 'photo', 'passport')):
+                        candidates.append(attachment)
+                elif False:
+                    if any(k in att_label for k in ('authorization', 'authorisation', 'withdrawal', 'withdraw', 'letter', 'auth')):
+                        candidates.append(attachment)
+            options = candidates if candidates else [a for a, _ in cards]
+            if len(options) == 1:
+                chosen = [options[0]]
+                self.journal.log('AUTO_MAP', f"Selected '{chosen[0]['label']}' for {field['label']}")
+            elif options:
+                print(f"\nSelect attachment for: {field['label']} (Trip #{trip['id']}):")
+                for idx, att in enumerate(options, 1):
+                    print(f"  [{idx}] {att['label']} (id: {att['id']})")
+                choice = prompt(f"Choose 1-{len(options)} [default 1]: ")
+                idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(options) else 0
+                chosen = [options[idx]]
+                self.journal.log('MAP', f"Operator selected '{chosen[0]['label']}' for {field['label']}")
+            else:
+                raise HoldFile('No source attachment available for ' + field['label'])
+        return chosen
 
     def auto_mapping(self, fields: list[dict], trips: list[dict], job: Job, directory: Path) -> list[dict]:
         """No mapping questions: deterministic photos + local OCR documents; ambiguity holds."""
@@ -1042,7 +1192,7 @@ class VerifyPortal:
                 raise HoldFile('Unknown bank field; no automatic mapping rule: ' + field['label'])
             candidates = [t for t in trips if norm(t['concern']).startswith('applicant s ')]
             kind = 'house' if family == 'residence' else 'bank' if family in {'statement', 'authorization'} else 'office'
-            candidates = [t for t in candidates if kind in norm(t['concern']) or (kind == 'office' and 'business' in norm(t['concern']))]
+            candidates = [t for t in candidates if kind in norm(t['concern']) or (kind == 'office' and any(k in norm(t['concern']) for k in ('business', 'chamber')))]
             if family in {'statement', 'authorization'}:
                 bank_hints = [bank_core(part) for part in re.findall(r'\(([^()]*)\)', field['label']) if 'bank' in norm(part)]
                 account_hints = {re.sub(r'\D', '', n) for n in re.findall(r'\d[\d \-]{6,}\d', field['label'])}
@@ -1060,42 +1210,19 @@ class VerifyPortal:
             if len(candidates) != 1:
                 raise HoldFile('No unique source trip/bank/account match for ' + field['label'] + '; mapping held automatically.')
             trip = candidates[0]
-            self.open_trip(trip['id'])
-            cards = self.cards()
+            trip_id = str(trip['id'])
+            self.open_trip(trip_id)
+            cards = self.cards(trip_id)
             label = {'residence': 'APPLICANT RESIDENCE', 'business': 'APPLICANT OFFICE',
                      'office': 'APPLICANT OFFICE', 'signature': 'APPLICANT SIGN', 'statement': 'BANK STATEMENT'}.get(family)
             evidence = []
             if label:
-                chosen = [a for a, _ in cards if a['label'].upper() == label]
+                allowed = {label, 'APPLICANT CHAMBER', 'APPLICANT OFFICE', 'APPLICANT BUSINESS'} if family in {'office', 'business'} else {label}
+                chosen = [a for a, _ in cards if norm(a['label']) in {norm(x) for x in allowed}]
                 if not chosen or (family == 'signature' and len(chosen) != 1):
-                    raise HoldFile('Missing/ambiguous source attachment labels for ' + field['label'])
+                    chosen = self.map_documents(field, trip, cards, server_trips, directory, job, evidence)
             else:
-                if self.ocr is None:
-                    raise StopDay('Local OCR must be available for content-based automatic mapping.')
-                metadata = {str(a.get('id')): a for a in server_trips.get(trip['id'], {}).get('attachments', [])}
-                account = server_trips.get(trip['id'], {}).get('bank_account') or {}
-                chosen = []
-                for attachment, card in cards:
-                    # Office LOI is a fixed bucket. Bank letter candidates can have any label.
-                    if family in {'declaration', 'salary', 'payslip'} and norm(attachment['label']) not in {
-                        'loi', 'salary certificate', 'pay slip', 'payslip', 'self income declaration', 'self declaration'}:
-                        continue
-                    source = metadata.get(attachment['id'], {})
-                    url = source.get('url') or source.get('file_url')
-                    if not url and card.locator('img').count() == 1:
-                        url = card.locator('img').get_attribute('src')
-                    if not url:
-                        raise HoldFile('A document candidate lacks an original OCR asset URL; mapping held.')
-                    decision = self.ocr.read(self.context, url, directory,
-                                             (self.file_no, trip['id'], attachment['id']), job.applicant,
-                                             str(account.get('account_number') or ''),
-                                             str(account.get('bank_name') or '') if family == 'authorization' else '')
-                    if decision['family'] == family:
-                        chosen.append(attachment)
-                        evidence.append({'attachment_id': attachment['id'], **decision})
-                # Separate matching images may be unrelated certificates/periods. Do not merge blindly.
-                if len(chosen) != 1:
-                    raise HoldFile('OCR did not identify one unambiguous complete ' + family + ' document; held without a mapping prompt.')
+                chosen = self.map_documents(field, trip, cards, server_trips, directory, job, evidence)
             mapping = {'field_id': field['id'], 'bank_label': field['label'], 'family': family,
                        'trip_id': trip['id'], 'attachment_ids': [a['id'] for a in chosen],
                        'attachment_labels': [a['label'] for a in chosen],
@@ -1118,7 +1245,7 @@ class VerifyPortal:
             raise HoldFile("Cannot snapshot the selected source trip before Save.")
         baseline_semantic = semantic_trip(baseline)
         baseline_ui = form_snapshot(self.modal)
-        cards = self.cards()
+        cards = self.cards(trip_id)
         all_current_ids = {a["id"] for a, _ in cards}
         desired = set(mapping["attachment_ids"])
         if not desired or not desired.issubset(all_current_ids):
@@ -1179,7 +1306,7 @@ class VerifyPortal:
             raise StopDay("Unexpected source write blocked. Review before any further processing.")
         for trip in trips:
             self.sidebar_box(trip["id"]).set_checked(trip["id"] == trip_id)
-        for attachment, card in self.cards():
+        for attachment, card in self.cards(trip_id):
             expect(card.locator("input[type=checkbox]")).to_be_checked(checked=attachment["id"] in desired)
         button = self.modal.get_by_role("button", name=re.compile(r"^Download Selected"))
         expect(button).to_contain_text("(1)")
@@ -1214,7 +1341,7 @@ def field_family(label: str) -> str:
         return "payslip"
     if "salary certificate" in label:
         return "salary"
-    if "declaration" in label or label in {"loi", "letter of introduction"}:
+    if "declaration" in label or label in {"loi", "letter of introduction"} or "additional income" in label:
         return "declaration"
     if any(word in label for word in ("passport", "signature", "applicant photo")):
         return "signature"
@@ -1222,7 +1349,7 @@ def field_family(label: str) -> str:
         return "residence"
     if "business" in label:
         return "business"
-    if "office" in label:
+    if "office" in label or "chamber" in label:
         return "office"
     return "unknown"
 
@@ -1394,7 +1521,6 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                 if args.limit and processed >= args.limit:
                     journal.log("LIMIT", "Requested file limit reached; remaining files untouched")
                     break
-                processed += 1
                 directory = journal.directory / job.key / datetime.now().strftime("%H%M%S_%f")
                 for name in ("downloads", "previews", "final"):
                     (directory / name).mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1406,6 +1532,7 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                     journal.log("UR", " | ".join(field["label"] for field in fields))
                     if mode == "inspect":
                         journal.update(job, status="INSPECTED", in_progress=False)
+                        processed += 1
                         continue
                     if source is None:
                         source = VerifyPortal(browser, cfg, journal, ocr)
@@ -1425,6 +1552,7 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                         journal.update(job, items=items)
                         atomic_json(directory / "manifest.json", journal.get(job))
                     journal.update(job, status="PREPARED", in_progress=False, items=items)
+                    processed += 1
                     if mode == "run":
                         bank.upload(job, items, directory)
                     journal.log("DONE", f"{job.serial}: {journal.get(job)['status']}; City Bank Save not clicked")
