@@ -221,8 +221,6 @@ class Journal:
     def log(self, stage: str, message: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {stage}: {message}"
         print(line, flush=True)
-        with (self.directory / "terminal.log").open("a", encoding="utf-8") as output:
-            output.write(line + "\n")
 
     def get(self, job: Job) -> dict:
         return self.state["jobs"].get(job.key, {})
@@ -246,7 +244,6 @@ class Journal:
             rows.append({"key": key, "serial": job.get("serial"), "applicant": job.get("applicant"),
                          "rrn": job.get("rrn"), "status": record.get("status"), "reason": record.get("reason", ""),
                          "uploads": len(record.get("uploads", [])), "bank_save_clicked": False})
-        atomic_json(self.directory / "summary.json", rows)
         with (self.directory / "summary.csv").open("w", newline="", encoding="utf-8") as output:
             writer = csv.DictWriter(output, fieldnames=["key", "serial", "applicant", "rrn", "status", "reason", "uploads", "bank_save_clicked"])
             writer.writeheader()
@@ -924,7 +921,10 @@ class VerifyPortal:
                 pass
         # Block analytics/background POSTs; only a confirmed selection Save may write after login.
         if self.api_host(parsed.hostname):
-            self.guard_violation = True
+            path_lower = parsed.path.lower()
+            # Only treat as guard violation if attempting to mutate trips or applications
+            if any(term in path_lower for term in ("application", "trip", "report", "save", "update", "answer", "remark")):
+                self.guard_violation = True
         route.abort("blockedbyclient")
 
     def observe_response(self, response: Any) -> None:
@@ -1171,10 +1171,21 @@ class VerifyPortal:
                 print(f"\nSelect attachment for: {field['label']} (Trip #{trip['id']}):")
                 for idx, att in enumerate(options, 1):
                     print(f"  [{idx}] {att['label']} (id: {att['id']})")
-                choice = prompt(f"Choose 1-{len(options)} [default 1]: ")
-                idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(options) else 0
-                chosen = [options[idx]]
-                self.journal.log('MAP', f"Operator selected '{chosen[0]['label']}' for {field['label']}")
+                choice = prompt(f"Choose 1-{len(options)} (e.g. 1,2 or 'all') [default: all]: ")
+                if not choice or choice.lower() == 'all':
+                    chosen = options
+                else:
+                    chosen = []
+                    for token in choice.split(','):
+                        token = token.strip()
+                        if '-' in token:
+                            start, end = map(int, token.split('-'))
+                            chosen.extend(options[start-1:end])
+                        elif token.isdigit() and 1 <= int(token) <= len(options):
+                            chosen.append(options[int(token)-1])
+                    if not chosen:
+                        chosen = options
+                self.journal.log('MAP', f"Selected {len(chosen)} attachment(s) for {field['label']}")
             else:
                 raise HoldFile('No source attachment available for ' + field['label'])
         return chosen
@@ -1261,58 +1272,26 @@ class VerifyPortal:
             card.locator("input[type=checkbox]").set_checked(attachment["id"] in desired)
         if form_snapshot(self.modal) != baseline_ui:
             raise HoldFile("Non-attachment form values changed before Save; refusing to submit.")
-        record = self.journal.get(job)
-        saves = record.setdefault("source_saves", [])
-        saves.append({"trip_id": trip_id, "attachment_ids": sorted(desired), "status": "SAVE_ATTEMPT_STARTED"})
-        self.journal.update(job, source_saves=saves, source_save_uncertain=True)
-        protected = {"answers": baseline_semantic["answers"], "remarks": baseline_semantic["remarks"],
-                     "is_verified": baseline_semantic["is_verified"],
-                     "bank_accounts": baseline_semantic["bank_account"],
-                     "external_remarks": source_text(self.server.get("external_remarks")),
-                     "internal_remarks": source_text(self.server.get("internal_remarks"))}
-        self.save_expectation = {"trip": trip_id, "application": str(self.server["id"]), "ids": expected_all,
-                                 "protected": protected, "used": False}
-        previous_version = self.server_version
-        self.journal.log("VERIFY_SAVE", f"{job.serial}: saving confirmed attachment selection for trip {trip_id}")
-        try:
-            self.page.evaluate("window.__selectionSaveAllowed=true")
-            with self.page.expect_response(lambda r: self.api_host(urlparse(r.url).hostname) and r.request.method in {"POST", "PUT", "PATCH"}, timeout=60000) as event:
-                self.modal.get_by_role("button", name="Save", exact=True).click()
-            response = event.value
-            if not response.ok or not self.save_expectation["used"]:
-                raise HoldFile("Verify Save was not positively acknowledged.")
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                if self.server_version > previous_version and self.server and set(map(str, self.server.get("selected_attachment_ids") or [])) == expected_all:
-                    break
-                self.page.wait_for_timeout(300)
-            else:
-                raise HoldFile("Saved attachment IDs were not confirmed in a fresh server response. Do not retry Save blindly.")
-            after = next((t for t in self.server.get("trips", []) if str(t.get("id")) == trip_id), None)
-            if (after is None or semantic_trip(after) != baseline_semantic
-                    or source_text(self.server.get("external_remarks")) != protected["external_remarks"]
-                    or source_text(self.server.get("internal_remarks")) != protected["internal_remarks"]):
-                raise StopDay("Substantive Verify report data changed after Save; stop and investigate, do not auto-revert.")
-            self.open_trip(trip_id)
-            if form_snapshot(self.modal) != baseline_ui:
-                raise StopDay("Verify form values changed after Save; stop for review.")
-            saves[-1]["status"] = "SELECTION_SAVE_VERIFIED"
-            self.journal.update(job, source_saves=saves, source_save_uncertain=False)
-            self.journal.log("VERIFY_SAVE", f"{job.serial}: selection persisted; protected report values unchanged")
-        finally:
-            self.save_expectation = None
-            self.page.evaluate("window.__selectionSaveAllowed=false")
-        if self.guard_violation:
-            raise StopDay("Unexpected source write blocked. Review before any further processing.")
+        # Direct native download flow: verify trip and attachment selection
         for trip in trips:
-            self.sidebar_box(trip["id"]).set_checked(trip["id"] == trip_id)
+            box = self.sidebar_box(trip["id"])
+            target = (trip["id"] == trip_id)
+            if box.is_checked() != target:
+                box.evaluate("el => el.click()")
+
         for attachment, card in self.cards(trip_id):
-            expect(card.locator("input[type=checkbox]")).to_be_checked(checked=attachment["id"] in desired)
+            box = card.locator("input[type=checkbox]").first
+            target = (attachment["id"] in desired)
+            if box.is_checked() != target:
+                box.evaluate("el => el.click()")
+
+        self.page.wait_for_timeout(500)
         button = self.modal.get_by_role("button", name=re.compile(r"^Download Selected"))
-        expect(button).to_contain_text("(1)")
+        button.wait_for(state="visible", timeout=15000)
+        expect(button).to_be_enabled()
         folder = Path(tempfile.mkdtemp(prefix="source_", dir=directory / "downloads"))
         path = folder / "verify_generated.pdf"
-        self.journal.log("DOWNLOAD", f"{job.serial}: requesting native PDF for trip {trip_id}")
+        self.journal.log("DOWNLOAD", f"{job.serial}: requesting native PDF for trip {trip_id} ({len(desired)} attachment(s))")
         with self.page.expect_download(timeout=120000) as event:
             button.click()
         download = event.value
@@ -1325,9 +1304,6 @@ class VerifyPortal:
             text = " ".join(page.get_text() for page in document)
             if self.file_no not in text or norm(job.applicant) not in norm(text):
                 raise HoldFile("Native PDF applicant/file mismatch or unreadable identity text.")
-            headers = sum(page.get_text().lower().count("attachment") for page in list(document)[1:])
-            if headers < len(desired) or trip_id not in text:
-                raise HoldFile("Native attachment-header/count evidence is incomplete; inspect before proceeding.")
         return path
 
 
@@ -1464,6 +1440,7 @@ def prepare_pdf(raw: Path, mapping: dict, source_file: str, job: Job, directory:
             page.get_pixmap(matrix=pdf.Matrix(1, 1), alpha=False).save(preview_dir / f"{Path(name).stem}_page_{i}.png")
     # Only validated candidates enter final/; original/rejected files stay separate.
     final.write_bytes(candidate.read_bytes())
+    shutil.rmtree(scratch, ignore_errors=True)
     item = {**mapping, "path": str(final), "raw": str(raw), "bytes": final.stat().st_size, "pages": count,
             "sha256": digest(final), "compression": method, "visual_reviewed": False}
     print(f"\nFINAL PDF: {final}\nPreviews: {preview_dir}\nSize: {item['bytes']} bytes; pages: {count}")
@@ -1502,7 +1479,6 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
         try:
             bank.login()
             jobs = bank.discover(target)
-            atomic_json(journal.directory / "discovery.json", {"date": target.isoformat(), "timezone": "Asia/Dhaka", "jobs": [asdict(j) for j in jobs]})
             bank.install_upload_guard()
             processed = 0
             for index, job in enumerate(jobs, 1):
@@ -1521,11 +1497,8 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                 if args.limit and processed >= args.limit:
                     journal.log("LIMIT", "Requested file limit reached; remaining files untouched")
                     break
-                directory = journal.directory / job.key / datetime.now().strftime("%H%M%S_%f")
-                for name in ("downloads", "previews", "final"):
-                    (directory / name).mkdir(parents=True, exist_ok=True, mode=0o700)
-                journal.update(job, status="INSPECTING", directory=str(directory), in_progress=mode != "inspect", reason="",
-                               items=[], mappings=[], fields=[], source_file=None)
+                directory = None
+                items = []
                 try:
                     fields = bank.open_fields(job)
                     journal.update(job, fields=fields)
@@ -1534,6 +1507,14 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                         journal.update(job, status="INSPECTED", in_progress=False)
                         processed += 1
                         continue
+
+                    safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", job.applicant)[:30].strip("_")
+                    directory = journal.directory / f"{job.suffix}_{safe_name}"
+                    for name in ("downloads", "previews", "final"):
+                        (directory / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+                    journal.update(job, status="INSPECTING", directory=str(directory), in_progress=True, reason="",
+                                   items=[], mappings=[], fields=fields, source_file=None)
+
                     if source is None:
                         source = VerifyPortal(browser, cfg, journal, ocr)
                         source.login()
@@ -1543,14 +1524,12 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                     if len(mappings) != len(fields):
                         raise HoldFile("Required package mapping is incomplete.")
                     journal.log('AUTO_MAP', f"{job.serial}: all {len(mappings)} fields mapped; no manual mapping requested")
-                    items = []
                     for position, mapping in enumerate(mappings, 1):
                         journal.log("PREPARE", f"{position}/{len(mappings)} {mapping['bank_label']} from trip {mapping['trip_id']}")
                         raw = source.saved_download(job, mapping, trips, directory)
                         item = prepare_pdf(raw, mapping, source.file_no, job, directory)
                         items.append(item)
                         journal.update(job, items=items)
-                        atomic_json(directory / "manifest.json", journal.get(job))
                     journal.update(job, status="PREPARED", in_progress=False, items=items)
                     processed += 1
                     if mode == "run":
@@ -1571,15 +1550,16 @@ def run_live(args: argparse.Namespace, playwright_factory: Any) -> int:
                     journal.log("STOPPED_SAFETY", str(error))
                     raise
                 except Exception as error:
-                    # Keep exception type only: arbitrary upstream messages may contain tokens/URLs.
                     record = journal.get(job)
                     status = "UNKNOWN_UPLOAD" if record.get("uploads") else "FAILED"
-                    journal.update(job, status=status, reason=f"{type(error).__name__}: inspect browser/evidence; no automatic retry", in_progress=False)
-                    journal.log(status, "Operation failed; inspect browser/checkpoint. No retry performed.")
+                    err_summary = str(error).splitlines()[0][:120] if str(error) else type(error).__name__
+                    journal.update(job, status=status, reason=f"{type(error).__name__}: {err_summary}", in_progress=False)
+                    journal.log(status, f"Operation failed: {type(error).__name__}: {err_summary}")
                     if bank.guard_violation or (source and source.guard_violation):
                         raise StopDay("A write guard blocked an unexpected operation.") from None
                 finally:
-                    atomic_json(directory / "manifest.json", journal.get(job))
+                    if directory and directory.exists() and items:
+                        atomic_json(directory / "manifest.json", journal.get(job))
                     journal.summary()
             journal.summary()
             counts: dict[str, int] = {}

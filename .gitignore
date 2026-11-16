@@ -4,11 +4,15 @@
 !.env.example
 creds.md
 
-# Customer documents, screenshots, evidence and private queues
+# Customer documents, screenshots, evidence, logs and private queues
+runs/
 /runs/
+*.log
 /artifacts/
 /images/
 approved-files*.json
+cpv_file_*/
+*_BN.md
 
 # Private assistant configuration/history; not needed to run the application
 .claude/

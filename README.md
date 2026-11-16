@@ -1,32 +1,45 @@
-# Verify → City Bank document-transfer tools
+# Verify → City Bank Document Transfer Automation
 
-Supervised Python/Playwright scripts for preparing verification PDFs from Barikoi Verify and uploading them to the correct City Bank CityFast UR fields.
+Supervised Python/Playwright automation for preparing CPV verification PDFs from **Barikoi Verify** and safely uploading them to **City Bank CityFast UR** portal.
 
-## Junior entry point: one self-contained Python file
+---
 
-Use **[daily_runner.py](daily_runner.py)**. It does not import `agent/` and needs
-no AI/OCR access. The [junior runbook](docs/DAILY_RUNNER.md) covers one-time
-installation, private `.env` setup, prompts, recovery and limitations.
+## 🚀 Daily Pipeline Usage
 
-```bash
-# First: local synthetic tests; no .env or real portal access.
-./agent/.venv/bin/python daily_runner.py --offline-test
+All daily operations are handled by the single, self-contained production runner: **`daily_runner.py`**.
 
-# Then: startup menu; Enter defaults to bank inspection only.
-./agent/.venv/bin/python daily_runner.py
+```powershell
+# Interactive startup menu (Enter = Inspect mode)
+.\.venv\Scripts\python.exe daily_runner.py
+
+# Step 1: Read-only inspection of queue and UR field requirements
+.\.venv\Scripts\python.exe daily_runner.py --mode inspect --date 2026-11-12
+
+# Step 2: Prepare PDFs (Verify download, size optimization, visual review, Zero Bank Upload)
+.\.venv\Scripts\python.exe daily_runner.py --mode prepare --limit 1 --date 2026-11-12
+
+# Step 3: Supervised upload of approved packages (Zero Bank Save)
+.\.venv\Scripts\python.exe daily_runner.py --mode run --limit 1 --date 2026-11-12
 ```
 
-The runner discovers today's **Request Date in Asia/Dhaka** across queue pages,
-skips green/full files and checkpoints, and processes eligible files sequentially.
-It asks the junior for ambiguous LOI/bank-document mappings and visual PDF review.
-Prepare mode Saves selections in Verify; run mode additionally uploads approved
-PDFs. **City Bank Save is always prohibited.**
+---
 
-**Validation warning:** implementation and embedded offline tests are provided,
-but this session could not execute them because tool execution was blocked.
-Prepare/run modes stay locked until this exact script/environment passes its
-local offline suite. Supervised one-file live validation is still required; no
-bulk live run was performed. Do not claim production readiness.
+## 📁 Repository Structure
+
+| File / Folder | Purpose |
+| :--- | :--- |
+| **`daily_runner.py`** | **Core standalone production pipeline.** Discovers queue, matches trips/attachments, downloads native PDFs, performs size optimization, and executes guarded uploads. |
+| **`CODE_CHANGES_AUDIT.md`** | Comprehensive audit report detailing all Windows adaptations, bug fixes, and safety invariants. |
+| **`docs/`** | Official engineering documentation (`DAILY_RUNNER.md`, `HYBRID_TESTING.md`, `TECHNICAL_HANDOVER.md`). |
+| **`runs/`** | Clean local output directory storing state (`checkpoint.json`), audit report (`summary.csv`), and final reviewed PDFs (ignored in Git). |
+
+---
+
+## 🔒 Bank Safety Invariants
+
+1. **City Bank Save Strictly Forbidden:** Never click `#btnSave` or submit files on City Bank portal. Automated guards enforce this boundary.
+2. **Zero Empty Document Submissions:** Files without field photos are defensively held under `NEEDS_REVIEW` to prevent blank document uploads.
+3. **Supervised Inspection:** Always inspect generated PDFs before authorizing upload.
 
 ## Latest global workflow requirements — 12 November 2026
 

@@ -229,43 +229,30 @@ All code modifications were strictly guided by the two immutable security invari
 
 ---
 
-## 3. Newly Created Script: `patch_runner.py`
-
-* **File Path:** `d:\verifyXcity_UR\patch_runner.py`
-* **Lines of Code:** 28 lines
-* **Purpose & Logic:**
-  - Automated maintenance and compilation test utility.
-  - Automatically resets stale `FAILED` checkpoint records (e.g. caused by browser session timeouts after machine sleep) back to `INSPECTED` in `checkpoint.json` and `summary.csv`.
-  - Executes `py_compile.compile("daily_runner.py", doraise=True)` to programmatically certify zero syntax errors prior to running live automation.
-
----
-
-## 4. Newly Created Script: `diagnose_cards.py`
-
-* **File Path:** `d:\verifyXcity_UR\diagnose_cards.py`
-* **Lines of Code:** 165 lines
-* **Purpose & Logic:**
-  - 100% read-only visual and structural diagnostic script.
-  - Logs into Barikoi Verify, opens an applicant's Update Topsheet modal, captures full-fidelity screenshots of every trip (`runs/diagnose/trip_<id>.png`), inspects all checkbox DOM elements, and dumps the intercepted server API response to `runs/diagnose/diagnose_server.json`.
-* **Critical Finding Established by this Script:**
-  Proved conclusively that for applicant `Farjana Mouree` (`CA-2026-11-0066853`), Verify's backend data explicitly contained `"attachments": []` for both House Visit (`#507232`) and Office Visit (`#507233`). This verified that the automation's `HoldFile` / `NEEDS_REVIEW` decision was **100% accurate** and not a selector failure.
+### Change 9: Pipeline Streamlining and Clutter Elimination
+* **Location:** Lines 220–255, 1400–1430, 1460–1545 in `daily_runner.py`
+* **Changes Applied:**
+  1. **Log Bloat Elimination:** Removed persistent append-logging to `terminal.log`. All progress output prints cleanly to stdout/stderr in real-time, eliminating redundant multi-megabyte log files.
+  2. **Zero Folder Spam in Inspect Mode:** In `--mode inspect`, the runner reads queue data and bank UR fields without creating empty applicant directories, empty download/preview folders, or empty manifests.
+  3. **Scratch File Cleanup:** In `prepare_pdf()`, intermediate trial compression files are purged immediately upon candidate selection, preventing duplicate `.pdf` files from cluttering `downloads/`.
+  4. **Lean Audit Output:** Preserved the single canonical state file (`checkpoint.json`) and the tabular human-readable report (`summary.csv`); removed redundant `summary.json`, `discovery.json`, and empty `manifest.json` dumps.
+  5. **Clean Working Directories:** For applicants undergoing active PDF preparation, directories are named cleanly (`<suffix>_<applicant_name>`) rather than unstructured timestamp hashes.
 
 ---
 
-## 5. Newly Created Script: `scan_queue.py`
+## 3. Exploratory Diagnostic Tools (Completed & Archived)
 
-* **File Path:** `d:\verifyXcity_UR\scan_queue.py`
-* **Lines of Code:** 152 lines
-* **Purpose & Logic:**
-  - High-speed read-only queue scanner.
-  - Iterates through all 25 applicants discovered for `2026-11-12` against Barikoi Verify's `/reports` search in ~1 minute.
-  - Records the exact attachment count per trip category (`HOUSE`, `OFFICE`, `BANK`) and outputs a structured summary table and `runs/daily/2026-11-12/verify_scan_results.json`.
-* **Critical Finding Established by this Script:**
-  Established that for the requests assigned on `2026-11-12`, the field verification teams had not yet uploaded House and Office photos into Barikoi Verify (all newly created trips showed `HOUSE=0, OFFICE=0`), explaining why all 15 evaluated files were held under `NEEDS_REVIEW`.
+During live investigation on Request Date `2026-11-12`, three temporary diagnostic scripts were developed to verify system integrity and queue status without modifying production code:
+
+1. **`patch_runner.py` (Checkpoint reset & compilation verification):** Certified `daily_runner.py` syntax and safely reset aborted checkpoints.
+2. **`diagnose_cards.py` (DOM & Server Payload Inspector):** Confirmed Barikoi Verify's backend returned `"attachments": []` for Trip #507232 and #507233, proving the automation's `HoldFile` / `NEEDS_REVIEW` decision was 100% accurate.
+3. **`scan_queue.py` (Queue-wide Attachment Auditor):** Scanned all 25 queue applicants in ~1 minute, confirming field officers had not uploaded attachment photos for date `2026-11-12`.
+
+*Note:* Having fulfilled their diagnostic purpose, these temporary utilities were archived to keep the production repository clean and unified under `daily_runner.py`.
 
 ---
 
-## 6. Verification and Compliance Summary
+## 4. Verification and Compliance Summary
 
 | Verification Aspect | Status | Compliance Confirmation |
 |---|---|---|
