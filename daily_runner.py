@@ -1598,7 +1598,8 @@ def main() -> int:
         print("STOPPED:", str(error), flush=True)
         return 2
     except Exception as error:
-        print(f"STOPPED: {type(error).__name__}. Inspect configuration/browser; credentials are intentionally not printed.", flush=True)
+        msg = str(error).splitlines()[0][:140] if str(error) else ""
+        print(f"STOPPED: {type(error).__name__}: {msg}. Inspect configuration/browser/network.", flush=True)
         return 2
 
 

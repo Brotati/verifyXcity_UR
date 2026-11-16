@@ -4,6 +4,38 @@ Supervised Python/Playwright automation for preparing CPV verification PDFs from
 
 ---
 
+## 🛠️ One-Time Setup on a New PC (Windows PowerShell)
+
+Requirements: **Python 3.10+** and **Git** installed on Windows.
+
+### 1. Clone & Navigate to Repository
+```powershell
+git clone <REPO_URL>
+cd verifyXcity_UR
+git checkout windows-fixes-and-audit
+```
+
+### 2. Create Virtual Environment & Install Dependencies
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install playwright PyMuPDF python-dotenv tzdata
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
+### 3. Configure Credentials (`.env`)
+Create a `.env` file in the project root (reference `.env.example`) and set private portal credentials:
+```env
+VERIFY_BASE=https://verify.bmapsbd.com
+CITY_BASE=https://cityfastagent.citybankplc.com
+
+VERIFY_EMAIL=your_verify_email
+VERIFY_PASS=your_verify_password
+CITY_ID=your_city_bank_user_id
+CITY_PASS=your_city_bank_password
+```
+
+---
+
 ## 🚀 Daily Pipeline Usage
 
 All daily operations are handled by the single, self-contained production runner: **`daily_runner.py`**.
